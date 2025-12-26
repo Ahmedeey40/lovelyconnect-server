@@ -1,68 +1,46 @@
-import asyncio
-import websockets
-import json
-import random
+import asyncio, websockets, json
 
-# Waxaan u habaynay inaan aqoonsanno qof walba ws-kiisa
-clients = {} # {code: [ws1, ws2]}
-
-def generate_code():
-    return str(random.randint(100000, 999999))
+# Rooms structure: { "773834": { "host": ws, "users": {ws: {"name": "User1", "muted": False}} } }
+rooms = {}
 
 async def handler(ws):
-    current_code = None
+    current_room = None
     try:
         async for msg in ws:
             data = json.loads(msg)
             m_type = data.get("type")
 
-            # 1. Sameynta Code cusub
-            if m_type == "create":
-                # Haddii uu hore code u lahaa, ka saar kii hore
-                if current_code in clients:
-                    del clients[current_code]
+            if m_type == "join_room":
+                room_id = data["room"]
+                if room_id not in rooms:
+                    rooms[room_id] = {"host": ws, "users": {}}
                 
-                current_code = generate_code()
-                clients[current_code] = [ws]
-                await ws.send(json.dumps({"type": "code", "code": current_code}))
+                if len(rooms[room_id]["users"]) >= 8:
+                    await ws.send(json.dumps({"type": "error", "msg": "Qolku waa buuxaa (Max 8)"}))
+                    continue
 
-            # 2. Ku biirista code jira
-            elif m_type == "join":
-                code = data.get("code")
-                if code in clients:
-                    current_code = code
-                    # Haddii uu qof kale horay ugu jiray, la soco
-                    if ws not in clients[current_code]:
-                        clients[current_code].append(ws)
-                    
-                    # Ogeysii qofka koowaad (Host-ka) in qof rabo inuu ku soo biiro
-                    await clients[current_code][0].send(json.dumps({"type": "request"}))
-                else:
-                    await ws.send(json.dumps({"type": "error", "message": "Code-kan ma jiro!"}))
+                rooms[room_id]["users"][ws] = {"muted": False}
+                current_room = room_id
+                
+                # Ogeysii dadka kale
+                for client in rooms[room_id]["users"]:
+                    await client.send(json.dumps({"type": "user_joined", "count": len(rooms[room_id]["users"])}))
 
-            # 3. Isu gudbinta xogta (WebRTC Signaling & Chat)
-            elif m_type in ["offer", "answer", "ice", "accept", "draw", "msg", "clear"]:
-                if current_code in clients:
-                    # U dir fariinta qofka kale ee isla code-ka kula jira
-                    for client in clients[current_code]:
-                        if client != ws and client.open:
-                            await client.send(msg)
+            elif m_type == "control": # Host-ka oo mute-gareynaya qof
+                if rooms[current_room]["host"] == ws:
+                    target_ws = data["target"] # Tani waxay u baahan tahay ID-yada ws
+                    # ... logic-ga xakamaynta ...
 
-    except websockets.exceptions.ConnectionClosed:
-        print("Xiriir ayaa go'ay")
+            elif m_type in ["offer", "answer", "ice"]:
+                # Isu gudbi WebRTC signaling-ka dadka qolka ku jira
+                for client in rooms[current_room]["users"]:
+                    if client != ws:
+                        await client.send(msg)
+
     finally:
-        # Marka uu qofka ka baxo, nadiifi clients-ka
-        if current_code in clients:
-            if ws in clients[current_code]:
-                clients[current_code].remove(ws)
-            if not clients[current_code]:
-                del clients[current_code]
+        if current_room in rooms:
+            del rooms[current_room]["users"][ws]
+            if not rooms[current_room]["users"]:
+                del rooms[current_room]
 
-async def main():
-    # Dekedda 10000 waa mida Render inta badan isticmaalo
-    async with websockets.serve(handler, "0.0.0.0", 10000):
-        print("LovelyConnect Server is running on port 10000...")
-        await asyncio.Future()  # Si joogto ah u shaqee
-
-if name == "main":
-    asyncio.run(main())
+asyncio.run(websockets.serve(handler, "0.0.0.0", 10000))
